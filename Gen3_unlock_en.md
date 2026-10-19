@@ -2,7 +2,7 @@
 
 Enabling PCIe Gen3 on a CMP 170HX requires three conditions: a software fuse override that permits Gen3 during startup, the GPU's internal Gen3 configuration, and successful link training by the driver and upstream port. Setting PCIe Target Link Speed, or seeing Gen3 listed as the maximum capability, does not prove that a Gen3 link has been established.
 
-This guide applies to Linux x86_64 and GA100 CMP 170HX cards (the device tested was `10de:2082`), with working NVIDIA open kernel modules and an existing fuse override implementation. The reference driver version is **615.71.09**. All procedure-specific code is included here; you do not need to read the author's separate scripts. Building still requires NVIDIA source matching the driver and the system's build tools.
+This guide applies to Linux x86_64 and GA100 CMP 170HX cards (the device tested was `10de:2082`), with working NVIDIA open kernel modules. This guide includes source integration and validation of fuse override; existing support for normal CMP initialization is still a prerequisite. The reference driver version is **615.71.09**. All procedure-specific code is included here; you do not need to read the author's separate scripts. Building still requires NVIDIA source matching the driver and the system's build tools.
 
 # Validation scope
 
@@ -53,6 +53,365 @@ modprobe -c | grep '^options nvidia '
 ```
 
 Merge these keys into the existing configuration, retaining only one effective value for each key. Preserve existing SM/TPC masks, memory settings, and BAR parameters. In particular, do not copy TPC screening results from a different card. Check `NVreg_RegistryDwordsPerDevice` for conflicting overrides for the target GPU, such as `CmpGen3=0`.
+
+### 1. Confirm that the module actually implements fuse override
+
+`cmp_fuse_gen3` is not a stock NVIDIA parameter. Check the module you intend to install; if the driver is loaded, also check the parameter files of the running module:
+
+```bash
+modinfo -p nvidia | grep -E '^cmp_fuse_(gen3|bdf):'
+# Only when nvidia is loaded: these belong to the running module, not the candidate on disk
+ls /sys/module/nvidia/parameters/cmp_fuse_{gen3,bdf}
+```
+
+If these parameters are absent, adding `cmp_fuse_gen3=0` to modprobe configuration is not sufficient. Integrate the source below, then build and install it together with the later Gen3 code. If the source already defines these parameters and `nv_cmp170hx_fuse_override()`, do not paste duplicate definitions; verify that probe actually calls the function.
+
+### 2. Implement the probe-stage fuse override
+
+The file is `kernel-open/nvidia/nv-pci.c`. The following is the fuse override block from the 615.71.09 source used in this troubleshooting session, with only the unrelated BAR1 size parameter declarations omitted. Place it after the existing headers and before the definition of `nv_pci_probe()`. Headers already included need not be added again.
+
+The complete parameter table and function are retained because the known GPC/TPC and other OPT values must be copied into their corresponding `_CP` shadows before enabling `EN_SW_OVERRIDE`, rather than replacing settings that were not requested with stale shadow values. **For this guide, set only `cmp_fuse_gen3=0`; do not additionally set `cmp_fuse_gpc=0`, `cmp_fuse_tpc*=0`, or `cmp_fuse_flr=1` just to enable Gen3.** Leave other parameters at their defaults or retain their existing validated settings. Inclusion of other features in this code does not imply that all those branches were validated by this guide.
+
+<details>
+<summary>Expand: complete probe fuse override code</summary>
+
+```c
+#include <linux/io.h>
+#include <linux/moduleparam.h>
+
+/*
+ * cmpunlocker: early fuse SW override (EXPERIMENTAL, off by default).
+ *
+ * Runs in nv_pci_probe() right after BAR0 is claimed -- before RM init and
+ * GSP boot -- so anything that consumes the OPT_* fuses during driver
+ * bring-up sees the override instead of the burned value.
+ * Equivalent to `ga100_rir --sw-enable` + `--sw-write <reg> <val>`.
+ *
+ * Two kinds of registers:
+ *  - floorsweep masks with a _CP shadow (gpc/fbp/fbpa/fbio/l2/nvlink):
+ *    written to _CP with EN_SW_OVERRIDE=1;
+ *  - fuses without a _CP shadow (gen3/ecc/ecc_ovr*): the register itself is
+ *    written directly. This may be PLM-blocked this early; the readback
+ *    in dmesg shows whether it stuck.
+ *
+ * Every value is VOLATILE: a GPU reset clears it. -1 (default) = leave that
+ * register alone. cmp_fuse_bdf limits the override to one GPU. Example:
+ *   options nvidia cmp_fuse_bdf=0000:02:00.0 cmp_fuse_gpc=0 cmp_fuse_gen3=0
+ */
+#define CMP_FUSE_EN_SW_OVERRIDE         0x00820040
+#define CMP_FUSE_DISABLE_SW_OVERRIDE    0x00820084
+/* must cover the highest register in cmp_fuse_regs (0x82382C) */
+#define CMP_FUSE_MAP_SIZE               0x00824000
+
+static char *cmp_fuse_bdf  = "";
+static int cmp_fuse_gpc    = -1;
+static int cmp_fuse_tpc0   = -1;
+static int cmp_fuse_tpc1   = -1;
+static int cmp_fuse_tpc2   = -1;
+static int cmp_fuse_tpc3   = -1;
+static int cmp_fuse_tpc4   = -1;
+static int cmp_fuse_tpc5   = -1;
+static int cmp_fuse_tpc6   = -1;
+static int cmp_fuse_tpc7   = -1;
+static int cmp_fuse_fbp    = -1;
+static int cmp_fuse_fbpa   = -1;
+static int cmp_fuse_fbio   = -1;
+static int cmp_fuse_l2     = -1;
+static int cmp_fuse_nvlink = -1;
+static int cmp_fuse_gen3   = -1;
+static int cmp_fuse_ecc    = -1;
+static int cmp_fuse_ecc_ovr  = -1;
+static int cmp_fuse_ecc_ovr2 = -1;
+static int cmp_fuse_ecc_ovr3 = -1;
+static int cmp_fuse_flr    = 0;
+module_param(cmp_fuse_bdf,    charp, 0444);
+module_param(cmp_fuse_gpc,    int, 0444);
+module_param(cmp_fuse_tpc0,   int, 0444);
+module_param(cmp_fuse_tpc1,   int, 0444);
+module_param(cmp_fuse_tpc2,   int, 0444);
+module_param(cmp_fuse_tpc3,   int, 0444);
+module_param(cmp_fuse_tpc4,   int, 0444);
+module_param(cmp_fuse_tpc5,   int, 0444);
+module_param(cmp_fuse_tpc6,   int, 0444);
+module_param(cmp_fuse_tpc7,   int, 0444);
+module_param(cmp_fuse_fbp,    int, 0444);
+module_param(cmp_fuse_fbpa,   int, 0444);
+module_param(cmp_fuse_fbio,   int, 0444);
+module_param(cmp_fuse_l2,     int, 0444);
+module_param(cmp_fuse_nvlink, int, 0444);
+module_param(cmp_fuse_gen3,   int, 0444);
+module_param(cmp_fuse_ecc,    int, 0444);
+module_param(cmp_fuse_ecc_ovr,  int, 0444);
+module_param(cmp_fuse_ecc_ovr2, int, 0444);
+module_param(cmp_fuse_ecc_ovr3, int, 0444);
+module_param(cmp_fuse_flr,    int, 0444);
+MODULE_PARM_DESC(cmp_fuse_bdf,    "CMP 170HX: only apply fuse overrides to this PCI BDF (empty = all)");
+MODULE_PARM_DESC(cmp_fuse_gpc,    "CMP 170HX: OPT_GPC_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_fbp,    "CMP 170HX: OPT_FBP_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_fbpa,   "CMP 170HX: OPT_FBPA_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_fbio,   "CMP 170HX: OPT_FBIO_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_l2,     "CMP 170HX: OPT_ROP_L2_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_nvlink, "CMP 170HX: OPT_NVLINK_DISABLE_CP override at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_gen3,   "CMP 170HX: OPT_DISABLE_GEN3_SPEED + OPT_PCIE_BOOT_GEN3_DIS direct write at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_ecc,    "CMP 170HX: OPT_ECC_EN direct write at probe (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_ecc_ovr,  "CMP 170HX: FEATURE_OVERRIDE_ECC (0x82380c) direct write at probe, e.g. 0x999999 (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_ecc_ovr2, "CMP 170HX: 0x823810 ECC feature override direct write at probe, e.g. 0x3ffebf (-1 = off)");
+MODULE_PARM_DESC(cmp_fuse_ecc_ovr3, "CMP 170HX: 0x82382c ECC feature override direct write at probe, e.g. 0xf (-1 = off)");
+
+/* cp == 0: no _CP shadow, write the OPT register directly */
+static const struct
+{
+    const char *name;
+    int        *param;
+    NvU32       cp;
+    NvU32       opt;
+    NvU32       mask;
+} cmp_fuse_regs[] = {
+    { "gpc",       &cmp_fuse_gpc,    0x0082022C, 0x00820350, 0x000000FF },
+    { "tpc0",      &cmp_fuse_tpc0,   0x00820230, 0x00820760, 0x000000FF },
+    { "tpc1",      &cmp_fuse_tpc1,   0x00820504, 0x00820764, 0x000000FF },
+    { "tpc2",      &cmp_fuse_tpc2,   0x008205F4, 0x00820768, 0x000000FF },
+    { "tpc3",      &cmp_fuse_tpc3,   0x008205A0, 0x0082076c, 0x000000FF },
+    { "tpc4",      &cmp_fuse_tpc4,   0x008204C4, 0x00820770, 0x000000FF },
+    { "tpc5",      &cmp_fuse_tpc5,   0x008204CC, 0x00820774, 0x000000FF },
+    { "tpc6",      &cmp_fuse_tpc6,   0x00820B8C, 0x00820778, 0x000000FF },
+    { "tpc7",      &cmp_fuse_tpc7,   0x00820B88, 0x0082077c, 0x000000FF },
+    { "gen3",      &cmp_fuse_gen3,   0,          0x00820250, 0x00000001 },
+    { "gen3_boot", &cmp_fuse_gen3,   0,          0x00820580, 0x00000001 },
+    { "ecc",       &cmp_fuse_ecc,    0,          0x00820228, 0x00000001 },
+    { "ecc_ovr",   &cmp_fuse_ecc_ovr,  0,        0x0082380C, 0x7FFFFFFF },
+    { "ecc_ovr2",  &cmp_fuse_ecc_ovr2, 0,        0x00823810, 0x7FFFFFFF },
+    { "ecc_ovr3",  &cmp_fuse_ecc_ovr3, 0,        0x0082382C, 0x7FFFFFFF },
+    { "nvlink",    &cmp_fuse_nvlink,  0x00820688, 0x00820684, 0x0000FFFF },
+};
+
+static void
+nv_cmp170hx_fuse_override(struct pci_dev *pci_dev, NvU8 bar)
+{
+    void __iomem *bar0;
+    NvBool requested = NV_FALSE;
+    unsigned int i;
+
+    if ((pci_dev->vendor != 0x10de) ||
+        ((pci_dev->device != 0x20c2) && (pci_dev->device != 0x2082)))
+        return;
+
+    if ((cmp_fuse_bdf != NULL) && (cmp_fuse_bdf[0] != '\0') &&
+        (strcmp(cmp_fuse_bdf, pci_name(pci_dev)) != 0))
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(cmp_fuse_regs); i++)
+    {
+        /* an access past the ioremap window oopses inside probe and hangs boot */
+        if ((cmp_fuse_regs[i].opt + 4 > CMP_FUSE_MAP_SIZE) ||
+            (cmp_fuse_regs[i].cp + 4 > CMP_FUSE_MAP_SIZE))
+        {
+            dev_err(&pci_dev->dev, "CMP fuse: %s is outside the BAR0 map; refusing all overrides\n",
+                    cmp_fuse_regs[i].name);
+            return;
+        }
+        if (*cmp_fuse_regs[i].param >= 0)
+            requested = NV_TRUE;
+    }
+    if (!requested)
+        return;
+
+    bar0 = ioremap(NV_PCI_RESOURCE_START(pci_dev, bar), CMP_FUSE_MAP_SIZE);
+    if (bar0 == NULL)
+    {
+        dev_err(&pci_dev->dev, "CMP fuse: cannot map BAR0; skipping override\n");
+        return;
+    }
+
+    if (readl(bar0 + CMP_FUSE_DISABLE_SW_OVERRIDE) & 1)
+    {
+        dev_err(&pci_dev->dev, "CMP fuse: disable_sw_override fuse is burned; skipping\n");
+        goto out;
+    }
+
+    /*
+     * Seed every known _CP with the current fused value before flipping
+     * EN_SW_OVERRIDE, so registers we were not asked to change keep their
+     * fused value instead of whatever _CP held after reset.
+     */
+    for (i = 0; i < ARRAY_SIZE(cmp_fuse_regs); i++)
+    {
+        NvU32 fused;
+
+        if (cmp_fuse_regs[i].cp == 0)
+            continue;
+        fused = readl(bar0 + cmp_fuse_regs[i].opt) & cmp_fuse_regs[i].mask;
+        writel(fused, bar0 + cmp_fuse_regs[i].cp);
+    }
+
+    writel(1, bar0 + CMP_FUSE_EN_SW_OVERRIDE);
+    (void)readl(bar0 + CMP_FUSE_EN_SW_OVERRIDE);
+
+    for (i = 0; i < ARRAY_SIZE(cmp_fuse_regs); i++)
+    {
+        NvU32 mask = cmp_fuse_regs[i].mask;
+        NvU32 val, fused, opt;
+
+        if (*cmp_fuse_regs[i].param < 0)
+            continue;
+
+        val   = (NvU32)*cmp_fuse_regs[i].param & mask;
+        fused = readl(bar0 + cmp_fuse_regs[i].opt) & mask;
+
+        if (cmp_fuse_regs[i].cp == 0)
+        {
+            NvU32 raw = readl(bar0 + cmp_fuse_regs[i].opt);
+            writel((raw & ~mask) | val, bar0 + cmp_fuse_regs[i].opt);
+            opt = readl(bar0 + cmp_fuse_regs[i].opt) & mask;
+            dev_warn(&pci_dev->dev,
+                     "CMP fuse: %s fused=0x%x write=0x%x opt=0x%x (direct)%s\n",
+                     cmp_fuse_regs[i].name, fused, val, opt,
+                     (opt != val) ? " (DID NOT STICK)" : "");
+        }
+        else
+        {
+            NvU32 cp, raw;
+
+            /*
+             * Dual write: OPT direct + _CP shadow. The OPT layer is what
+             * STATUS_OPT_* re-evaluates from (runtime-proven: writing
+             * OPT_GPC_DISABLE=0 flips STATUS_OPT_GPC immediately); the _CP
+             * shadow keeps cross-checks happy. Direct OPT writes stick at
+             * probe time (verified with the gen3 pair).
+             */
+            raw = readl(bar0 + cmp_fuse_regs[i].opt);
+            writel((raw & ~mask) | val, bar0 + cmp_fuse_regs[i].opt);
+            writel(val, bar0 + cmp_fuse_regs[i].cp);
+            cp  = readl(bar0 + cmp_fuse_regs[i].cp) & mask;
+            opt = readl(bar0 + cmp_fuse_regs[i].opt) & mask;
+            dev_warn(&pci_dev->dev,
+                     "CMP fuse: %s fused=0x%x write=0x%x cp=0x%x opt=0x%x (dual)%s\n",
+                     cmp_fuse_regs[i].name, fused, val, cp, opt,
+                     (opt != val) ? " (OPT DID NOT STICK)" :
+                     (cp != val) ? " (CP DID NOT STICK)" : "");
+        }
+    }
+
+    /*
+     * cmpunlocker: cmp_fuse_flr=1 -- floorsweep masks are latched at GPU
+     * reset; request a function-level reset after the _CP override so the
+     * fuse block re-evaluates the SW override. Diagnostic: read back
+     * STATUS_OPT_GPC (0x820c1c) before/after to see whether the latch
+     * cleared (GA100: RM consumes STATUS_OPT_GPC, not OPT_GPC_DISABLE).
+     */
+    if (cmp_fuse_flr)
+    {
+        NvU32 statusBefore = readl(bar0 + 0x00820c1c);
+        NvU32 cpGpc = readl(bar0 + 0x0082022c);
+        dev_warn(&pci_dev->dev,
+                 "CMP fuse: pre-FLR STATUS_OPT_GPC=0x%08x GPC_CP=0x%08x\n",
+                 statusBefore, cpGpc);
+        iounmap(bar0);
+
+        if (pci_reset_function(pci_dev) == 0)
+        {
+            void __iomem *bar0b;
+            bar0b = ioremap(NV_PCI_RESOURCE_START(pci_dev, bar), CMP_FUSE_MAP_SIZE);
+            if (bar0b != NULL)
+            {
+                dev_warn(&pci_dev->dev,
+                         "CMP fuse: post-FLR STATUS_OPT_GPC=0x%08x OPT_GPC=0x%08x EN_SW_OVERRIDE=%u\n",
+                         readl(bar0b + 0x00820c1c),
+                         readl(bar0b + 0x00820350),
+                         readl(bar0b + CMP_FUSE_EN_SW_OVERRIDE) & 1);
+                iounmap(bar0b);
+            }
+            else
+                dev_err(&pci_dev->dev, "CMP fuse: post-FLR BAR0 remap failed\n");
+        }
+        else
+            dev_err(&pci_dev->dev, "CMP fuse: FLR failed\n");
+        return;
+    }
+
+    dev_warn(&pci_dev->dev, "CMP fuse: EN_SW_OVERRIDE=%u (pre-RM/GSP)\n",
+             readl(bar0 + CMP_FUSE_EN_SW_OVERRIDE) & 1);
+out:
+    iounmap(bar0);
+}
+```
+
+</details>
+
+Inside `nv_pci_probe()`, add one call after BAR0 validation and successful region acquisition, immediately before the existing `NV_KZALLOC(nvl, ...)`. Preserve surrounding error handling. Do not move the call before BAR0 becomes accessible or defer it until after RM/GSP initialization:
+
+```c
+    /* BAR0 validation and request_mem_region have succeeded above. */
+    nv_cmp170hx_fuse_override(pci_dev, regs_bar_index);
+
+    NV_KZALLOC(nvl, sizeof(nv_linux_state_t));
+```
+
+In this implementation, if bit 0 of `0x00820084` disables software override, the function logs the condition and skips the operation; it does not attempt to burn fuses. The normal path seeds the known `_CP` registers, enables `EN_SW_OVERRIDE` at `0x00820040`, then clears bit 0 at `0x00820250` and `0x00820580` with immediate readback. These two Gen3 entries use direct OPT writes, not TPC masks.
+
+The default `cmp_fuse_gen3=-1` means “leave unchanged.” A value of `0` writes zero to the Gen3-disable bits, allowing Gen3; it does not disable the override feature. Changing configuration does not modify an already loaded module: rebuild/reload or reboot as described below. Reapply and verify after GPU resets as well; this is not a permanent unlock.
+
+### 3. Configure the target card and reload
+
+To target one card, add its full BDF restriction to the existing parameter line, for example:
+
+```text
+options nvidia NVreg_RegistryDwords="RmForceEnableGen2=1;RMPcieLinkSpeed=0x5;CmpGen3=1" cmp_fuse_bdf=0000:03:00.0 cmp_fuse_gen3=0
+```
+
+This is only an example of the Gen3-related settings to merge. Do not replace the entire existing line and lose SM/TPC, BAR, or other settings. Use the BDF enumerated on your own host. To apply the override to multiple supported CMP 170HX cards, omit `cmp_fuse_bdf` and retain its empty-string default; the code still filters for `10de:20c2/2082`. The hardware validated in this guide is `2082`; inclusion of `20c2` in the code is not evidence that it has also been validated.
+
+`cmp_fuse_bdf` is not an ECID matcher: update or remove a stale restriction after reseating a card. If an ECID loader manages per-card TPC masks, preserve that mechanism instead of replacing it with one common TPC mask. Preserve VFIO ownership of passthrough cards and use the host's existing guarded loading procedure. `modprobe -r` may also unload soft dependencies, while `--ignore-install` or direct `insmod` can bypass a custom loader.
+
+Complete the post-GSP Gen3 code, build/install steps, and boot-image handling below, then reboot into the new module. Even when the override code already exists and only parameters change, reload through the existing procedure after stopping GPU clients, or reboot. Repeated live register writes are not needed to inspect the state.
+
+### 4. Verify execution and read back the post-initialization state
+
+After reboot, check the running module's parameters and this boot's log:
+
+```bash
+BDF=0000:03:00.0
+cat /sys/module/nvidia/parameters/cmp_fuse_gen3
+cat /sys/module/nvidia/parameters/cmp_fuse_bdf
+sudo journalctl -k -b --no-pager | grep -E "${BDF}.*CMP fuse:|CMP fuse:.*${BDF}"
+```
+
+Expect entries for the target card such as `CMP fuse: gen3 ... write=0x0 opt=0x0 (direct)`, `CMP fuse: gen3_boot ... write=0x0 opt=0x0 (direct)`, and `EN_SW_OVERRIDE=1 (pre-RM/GSP)`. Resolve `DID NOT STICK`, mapping failures, or a disabled software override before proceeding. A parameter file containing `0` alone is not proof of a successful write. Missing logs also require checking the actual loaded module, BDF restriction, and call site.
+
+Probe logs establish the state only at that instant. Subsequent GSP/driver initialization may change it. Once the GPU initializes normally, the following read-only check inspects the current values without writing registers or switching the link:
+
+```bash
+sudo python3 - "$BDF" <<'PYREAD'
+import mmap, os, pathlib, struct, sys
+bdf = sys.argv[1]
+p = pathlib.Path('/sys/bus/pci/devices') / bdf
+if (p / 'vendor').read_text().strip() != '0x10de' or (p / 'device').read_text().strip() != '0x2082':
+    raise SystemExit('Not the validated 10de:2082 device')
+if not (p / 'driver').exists() or (p / 'driver').resolve().name != 'nvidia':
+    raise SystemExit('Run after successful NVIDIA initialization')
+regs = [(0x820040, 'EN_SW_OVERRIDE'), (0x820084, 'DISABLE_SW_OVERRIDE'),
+        (0x820250, 'OPT_DISABLE_GEN3_SPEED'),
+        (0x820580, 'OPT_PCIE_BOOT_GEN3_DIS'),
+        (0x82057c, 'OPT_GEN23 diagnostic only')]
+fd = os.open(p / 'resource0', os.O_RDONLY | os.O_SYNC)
+try:
+    with mmap.mmap(fd, 0x824000, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ) as m:
+        values = {off: struct.unpack_from('<I', m, off)[0] for off, _ in regs}
+        for off, name in regs:
+            print(f'{name:26s} 0x{off:08x} = 0x{values[off]:08x}')
+        if any(v == 0xffffffff or v & 0xffff0000 == 0xbadf0000 for v in values.values()):
+            raise SystemExit('Unreadable register; do not interpret as an override result')
+        if not (values[0x820040] & 1) or values[0x820084] & 1 or values[0x820250] & 1 or values[0x820580] & 1:
+            raise SystemExit('Expected Gen3 fuse override state is not present')
+        print('Expected Gen3 fuse override state is present; link training is still a separate check')
+finally:
+    os.close(fd)
+PYREAD
+```
+
+`OPT_GEN23` (`0x0082057c`) is included for diagnostics only. It is not the same register as either of the two Gen3-disable bits above. Without validating the corresponding driver timing, do not treat “clear this bit as well” as a universal patch. Adding this override during troubleshooting did not resolve the cold-boot issue and was reverted; that experiment must not be presented as a validated required step.
+
+Even if both disable bits read back as zero, the later GSP Gen3 configuration, RM training, and `LnkSta`, load, and reboot checks are still required. **A successful fuse override is not proof of a stable Gen3 link.**
 
 ## Driver code needed when only fuse override is implemented
 
