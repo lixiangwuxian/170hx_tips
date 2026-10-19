@@ -1,0 +1,31 @@
+Gen3_unlock.md
+  h_ecac91bbf58fce 1-387
+Gen3_unlock_en.md
+  h_ecac91bbf58fce 1-387
+README.md
+  h_ecac91bbf58fce 1-11
+README_en.md
+  h_ecac91bbf58fce 1-2,5-10
+  s_5a799d244794fc::t_7c242e89045515 3-4,11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ef573f044250cb817227d41d78c659976f8a28a3",
+  "prompts": {},
+  "humans": {
+    "h_ecac91bbf58fce": {
+      "author": "test <test@example.com>"
+    }
+  },
+  "sessions": {
+    "s_5a799d244794fc": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "2a7684f4-d675-4cc9-80bf-af6123335727",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "test <test@example.com>"
+    }
+  }
+}
