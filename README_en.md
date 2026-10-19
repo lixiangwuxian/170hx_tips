@@ -8,4 +8,4 @@ Before proceeding, follow the instructions in [170hx-rir-tool](https://github.co
 
 ## 2. PCIe Unlocking
 
-See [Gen3_unlock_en.md](./Gen3_unlock_en.md). There appear to be issues that cause only the first GPU to successfully enable Gen3 in multi-GPU configurations.
+See [Gen3_unlock_en.md](./Gen3_unlock_en.md). ~~There appear to be issues that cause only the first GPU to successfully enable Gen3 in multi-GPU configurations.~~ It appears that the PCIe controller inside one of my GPUs is physically damaged and it refuse to run at gen3.

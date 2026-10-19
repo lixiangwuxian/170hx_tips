@@ -8,4 +8,4 @@
 
 ## 2. PCIE解锁
 
-见[Gen3_unlock.md](./Gen3_unlock.md)。似乎存在一些问题，导致在多卡时只有第一张卡成功启用gen3。
+见[Gen3_unlock.md](./Gen3_unlock.md)。~~似乎存在一些问题，导致在多卡时只有第一张卡成功启用gen3。~~ 原来是我的卡的核心里面的PCIE控制器寄掉了，一拉起到gen3就掉卡。
