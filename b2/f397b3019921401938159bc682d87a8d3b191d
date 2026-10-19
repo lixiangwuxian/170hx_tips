@@ -1,0 +1,21 @@
+Gen3_unlock.md
+  s_f85e44630315bb::t_4e319e24481f8f 5,57-415
+Gen3_unlock_en.md
+  s_f85e44630315bb::t_05dea939a5b3c0 5,57-415
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b2f397b3019921401938159bc682d87a8d3b191d",
+  "prompts": {},
+  "sessions": {
+    "s_f85e44630315bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a152bc-0681-73a1-ba0e-bae2078d42ac",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "test <test@example.com>"
+    }
+  }
+}
